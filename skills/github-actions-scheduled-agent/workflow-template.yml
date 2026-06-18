@@ -1,0 +1,56 @@
+name: Scheduled Agent Run
+
+on:
+  schedule:
+    - cron: "0 9 * * *"   # daily at 09:00 UTC — adjust to your timezone
+  workflow_dispatch:        # also allows manual trigger from the Actions tab
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # required for the state commit-back step
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install Python + dependencies
+        run: uv sync         # reads pyproject.toml + uv.lock
+
+      # Optional: write any file-based secrets to disk before running the agent.
+      # Secrets can't be checked in if: conditions — use a run: step instead.
+      - name: Write optional config files
+        run: |
+          if [ -n "$MY_OPTIONAL_FILE_SECRET" ]; then
+            echo "$MY_OPTIONAL_FILE_SECRET" > config-file.txt
+            echo "CONFIG_FILE_PATH=config-file.txt" >> $GITHUB_ENV
+          fi
+        env:
+          MY_OPTIONAL_FILE_SECRET: ${{ secrets.MY_OPTIONAL_FILE_SECRET }}
+
+      - name: Run agent
+        env:
+          # Always set the LLM explicitly to avoid OpenAI fallback
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: anthropic/claude-sonnet-4-6
+
+          # Add your own secrets and variables here
+          MY_API_KEY: ${{ secrets.MY_API_KEY }}
+          MY_CONFIG_VAR: ${{ vars.MY_CONFIG_VAR }}
+        run: uv run crewai run   # or: uv run python -m your_module
+
+      # Commit any changed state files back to the repo.
+      # [skip ci] prevents this push from triggering another workflow run.
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/
+          git diff --staged --quiet || git commit -m "chore: update state [skip ci]"
+          git push
