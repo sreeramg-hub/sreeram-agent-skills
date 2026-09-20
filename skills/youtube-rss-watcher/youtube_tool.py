@@ -2,12 +2,18 @@
 YouTube RSS Watcher — CrewAI BaseTool
 Detects new uploads on YouTube channels without an API key or quota.
 
+Returns each new video's channel, title, date, link and the channel-written
+description. It does not read the video itself, so callers should not claim
+anything about what was said in it.
+
 Extracted from: https://github.com/sreeramg-hub/sreeram-agent-crew
 License: MIT
 """
 
 import json
 import pathlib
+import re
+import time
 import xml.etree.ElementTree as ET
 from typing import Type
 
@@ -23,9 +29,17 @@ STATE_DIR = pathlib.Path("state")
 
 NS_ATOM = "{http://www.w3.org/2005/Atom}"
 NS_YT = "{http://www.youtube.com/xml/schemas/2015}"
+NS_MEDIA = "{http://search.yahoo.com/mrss/}"
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
-# ── State helpers ──────────────────────────────────────────────────────────────
+# The feed endpoint is occasionally flaky (transient 404s), so retry a few times.
+FETCH_ATTEMPTS = 3
+
+# Descriptions are written by the channel: keep them short and strip links
+# (sponsor/affiliate spam) before they reach an LLM prompt.
+DESCRIPTION_MAX_CHARS = 400
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_seen(feed_name: str) -> set:
     path = STATE_DIR / f"{feed_name}_seen.json"
@@ -38,6 +52,34 @@ def _save_seen(feed_name: str, seen: set) -> None:
     STATE_DIR.mkdir(exist_ok=True)
     path = STATE_DIR / f"{feed_name}_seen.json"
     path.write_text(json.dumps(sorted(seen), indent=2))
+
+
+def _fetch_feed(channel_id: str) -> ET.Element:
+    last_error = None
+    for attempt in range(FETCH_ATTEMPTS):
+        if attempt:
+            time.sleep(2 * attempt)
+        try:
+            resp = requests.get(
+                RSS_URL.format(channel_id=channel_id),
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            resp.raise_for_status()
+            return ET.fromstring(resp.text)
+        except Exception as e:
+            last_error = e
+    raise last_error
+
+
+def _short_description(entry: ET.Element) -> str:
+    el = entry.find(f"{NS_MEDIA}group/{NS_MEDIA}description")
+    text = (el.text or "") if el is not None else ""
+    text = re.sub(r"https?://\S+", "", text)
+    text = " ".join(text.split())
+    if len(text) > DESCRIPTION_MAX_CHARS:
+        text = text[:DESCRIPTION_MAX_CHARS].rstrip() + "…"
+    return text
 
 # ── Tool ──────────────────────────────────────────────────────────────────────
 
@@ -59,7 +101,8 @@ class YoutubeNewUploadsTool(BaseTool):
     name: str = "youtube_new_uploads"
     description: str = (
         "Checks YouTube channels for videos not yet processed. "
-        "Returns new video titles, URLs, and published dates. "
+        "Returns each new video's channel, title, published date, link and the "
+        "channel-written description (the video itself is not read). "
         "Updates seen-state so the same video is never returned twice. "
         "Inputs: comma-separated channel_ids, feed_name (any short string identifier)."
     )
@@ -68,23 +111,17 @@ class YoutubeNewUploadsTool(BaseTool):
     def _run(self, channel_ids: str, feed_name: str) -> str:
         feed_name = feed_name.lower().strip()
         seen = _load_seen(feed_name)
-        new_videos = []
+        new_videos, errors, checked = [], [], []
 
         for channel_id in [c.strip() for c in channel_ids.split(",") if c.strip()]:
-            url = RSS_URL.format(channel_id=channel_id)
             try:
-                resp = requests.get(
-                    url, timeout=10, headers={"User-Agent": "Mozilla/5.0"}
-                )
-                resp.raise_for_status()
-                root = ET.fromstring(resp.text)
+                root = _fetch_feed(channel_id)
             except Exception as e:
-                new_videos.append(f"[ERROR fetching channel {channel_id}: {e}]")
+                errors.append(f"[ERROR fetching channel {channel_id}: {e}]")
                 continue
 
-            channel_title = getattr(
-                root.find(f"{NS_ATOM}title"), "text", channel_id
-            )
+            channel_title = getattr(root.find(f"{NS_ATOM}title"), "text", channel_id)
+            checked.append(channel_title)
 
             for entry in root.findall(f"{NS_ATOM}entry"):
                 vid_id_el = entry.find(f"{NS_YT}videoId")
@@ -95,21 +132,28 @@ class YoutubeNewUploadsTool(BaseTool):
                     continue
 
                 title = getattr(entry.find(f"{NS_ATOM}title"), "text", "Unknown title")
-                published = getattr(
-                    entry.find(f"{NS_ATOM}published"), "text", ""
-                )[:10]
-                video_url = f"https://www.youtube.com/watch?v={vid_id}"
+                published = getattr(entry.find(f"{NS_ATOM}published"), "text", "")[:10]
+                description = _short_description(entry)
 
                 new_videos.append(
                     f"- [{channel_title}] {published} | {title}\n"
-                    f"  URL: {video_url}\n"
-                    f"  ID: {vid_id}"
+                    f"  URL: https://www.youtube.com/watch?v={vid_id}\n"
+                    f"  Description (written by the channel, unverified): "
+                    f"{description or '(none provided)'}"
                 )
                 seen.add(vid_id)
 
         _save_seen(feed_name, seen)
 
-        if not new_videos:
-            return f"No new videos found for feed '{feed_name}' across the provided channels."
-
-        return f"Found {len(new_videos)} new video(s):\n\n" + "\n".join(new_videos)
+        parts = []
+        if new_videos:
+            parts.append(f"Found {len(new_videos)} new video(s):\n" + "\n".join(new_videos))
+        else:
+            parts.append(
+                f"No new videos found for feed '{feed_name}'. "
+                f"Channels checked: {', '.join(checked) or 'none'}."
+            )
+        if errors:
+            # Reported separately so a failed fetch is never mistaken for "no new videos".
+            parts.append("Some channels could not be checked this time:\n" + "\n".join(errors))
+        return "\n\n".join(parts)

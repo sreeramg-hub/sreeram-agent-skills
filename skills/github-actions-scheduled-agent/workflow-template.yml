@@ -8,6 +8,7 @@ on:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
+    timeout-minutes: 20   # fail hung runs instead of burning minutes
     permissions:
       contents: write       # required for the state commit-back step
 
