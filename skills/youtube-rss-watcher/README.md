@@ -20,9 +20,11 @@ https://www.youtube.com/feeds/videos.xml?channel_id=CHANNEL_ID
 - No quota
 - Returns the 15 most recent videos
 - Updates within minutes of a new upload
-- Works from any IP, any environment
+- Includes each video's title, date and description
 
-The only limitation: 15 videos max per channel. For daily monitoring of active channels, this is plenty.
+Limitations:
+- **15 videos max per channel.** For daily monitoring of active channels, this is plenty.
+- **The endpoint can be flaky.** It worked reliably from GitHub Actions runners in daily use, but on 2026-09-19 it returned `404` for every channel from one home network while the same channels worked from GitHub. The tool retries a few times and reports channels it could not fetch separately from "no new videos", so a broken fetch is never mistaken for a quiet day.
 
 ## How to find a channel ID
 
@@ -30,7 +32,7 @@ Channel IDs start with `UC` and are 24 characters long. Three ways to find one:
 
 **Option 1 — yt-dlp (most reliable):**
 ```bash
-yt-dlp --dump-single-json "https://www.youtube.com/@ChannelHandle/videos" --playlist-items 1 2>/dev/null \
+uvx yt-dlp --dump-single-json "https://www.youtube.com/@ChannelHandle/videos" --playlist-items 1 2>/dev/null \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('channel_id'))"
 ```
 
@@ -39,6 +41,10 @@ Open the channel page → View Source (Cmd+U) → search for `"channelId"`
 
 **Option 3 — URL:**
 If the channel URL is already in the format `youtube.com/channel/UC...`, that last segment is the ID.
+
+## What the tool returns
+
+For each new video: channel, title, published date, link, and the description the channel wrote (truncated to 400 characters, with links stripped). It does **not** read the video, so an agent using it should list and link videos rather than claim what was said in them. Descriptions are third-party text; treat them as untrusted input to your prompt.
 
 ## How the deduplication works
 
@@ -54,7 +60,7 @@ This means "new" means new since the last run, not new in the last 24 hours. Res
 
 In `youtube_tool.py`:
 - `STATE_DIR` — where your seen-state JSON files live
-- The `metal` parameter name is specific to the original project — rename it to whatever makes sense for your use case (e.g. `feed_name`, `topic`, `source`)
+- `DESCRIPTION_MAX_CHARS` and `FETCH_ATTEMPTS` — tune to taste
 
 In your crew or calling code:
 - Pass your own channel IDs

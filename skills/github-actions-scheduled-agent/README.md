@@ -85,12 +85,23 @@ env:
   MODEL: anthropic/claude-sonnet-4-6
 ```
 
+## Make failures loud
+
+A scheduled agent that fails quietly is worse than one that fails loudly. In the original project a broken tool was swallowed by a catch-all `except`, the agent reported "not available yet", and the workflow stayed green for about two months. Habits that prevent it:
+
+- **Fail the run when the important step fails.** If the last step is sending an email or posting a result, let its error propagate (non-zero exit) instead of returning an error string. A red run gets noticed; a green one doesn't.
+- **Put a health line in the output.** A footer such as "12/13 sources reachable · summariser: fallback" makes partial failures visible right where you read the result.
+- **Commit state only after success.** The commit-back step only runs if earlier steps passed, and your code should record "already processed" items *after* delivering the result. Then a failed run offers the same items again next time instead of silently dropping them.
+- **Set `timeout-minutes`.** A hung run otherwise burns runner minutes until GitHub's 6-hour default cuts it off.
+- **Don't let a green check mean "ran".** Make it mean "delivered what it was supposed to."
+
 ## What to change to use this yourself
 
 In `workflow-template.yml`:
 - `cron` expression — set your desired schedule
 - `env` block — add your own secrets and variables
 - The `git add state/` line — change `state/` to wherever your state files live
+- `timeout-minutes` — set it comfortably above a normal run
 
 In your agent code:
 - Set the LLM explicitly (see above)
